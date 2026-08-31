@@ -1,0 +1,15 @@
+[package]
+name = "screenink"
+version = "0.1.0"
+edition = "2021"
+description = "A lightweight X11 screenshot selector with red freehand annotations"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+dirs = "5"
+gdk = { package = "gdk4", version = "0.9" }
+gdk-pixbuf = "0.20"
+gtk = { package = "gtk4", version = "0.9" }
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
