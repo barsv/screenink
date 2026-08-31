@@ -1,2 +1,2 @@
-# Куда автоматически сохранять снимки. Путь можно сделать абсолютным.
+# Screenshots are saved here automatically. The path may be absolute.
 output_dir = "/home/stan/Pictures/Screenshots"

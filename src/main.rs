@@ -68,12 +68,12 @@ fn capture_desktop() -> Result<PathBuf, String> {
     let status = Command::new("gnome-screenshot")
         .args(["-f", path.to_string_lossy().as_ref()])
         .status()
-        .map_err(|error| format!("Не удалось запустить gnome-screenshot: {error}"))?;
+        .map_err(|error| format!("Could not run gnome-screenshot: {error}"))?;
 
     if status.success() && path.is_file() {
         Ok(path)
     } else {
-        Err("gnome-screenshot не смог создать изображение экрана".to_owned())
+        Err("gnome-screenshot could not create an image".to_owned())
     }
 }
 
@@ -101,10 +101,48 @@ struct SelectionState {
     current: Option<(f64, f64)>,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Tool {
+    #[default]
+    Pen,
+    Rectangle,
+}
+
+enum Annotation {
+    Freehand {
+        points: Vec<(f64, f64)>,
+        style: Brush,
+    },
+    Rectangle {
+        start: (f64, f64),
+        end: (f64, f64),
+        style: Brush,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct Brush {
+    red: f64,
+    green: f64,
+    blue: f64,
+    width: f64,
+}
+
+impl Default for Brush {
+    fn default() -> Self {
+        Self {
+            red: 0.9,
+            green: 0.02,
+            blue: 0.02,
+            width: PEN_WIDTH,
+        }
+    }
+}
+
 fn begin_selection(app: &gtk::Application, source_path: PathBuf, config: Rc<Config>) {
     let window = gtk::ApplicationWindow::builder()
         .application(app)
-        .title("ScreenInk — выделите область")
+        .title("ScreenInk — Select an area")
         .decorated(false)
         .build();
     window.fullscreen();
@@ -115,7 +153,7 @@ fn begin_selection(app: &gtk::Application, source_path: PathBuf, config: Rc<Conf
         Err(error) => {
             show_error(
                 &window,
-                &format!("Не удалось показать снимок для выделения: {error}"),
+                &format!("Could not display the screenshot: {error}"),
             );
             window.present();
             return;
@@ -189,30 +227,45 @@ fn begin_selection(app: &gtk::Application, source_path: PathBuf, config: Rc<Conf
         if width < 3.0 || height < 3.0 {
             return;
         }
-        let x = start_x.min(end.0);
-        let y = start_y.min(end.1);
         drop(selection);
 
-        let allocated_width = canvas.allocated_width() as f64;
-        let allocated_height = canvas.allocated_height() as f64;
         let source = match image::open(&end_source) {
             Ok(source) => source,
             Err(error) => {
-                show_error(&window, &format!("Не удалось открыть снимок: {error}"));
+                show_error(&window, &format!("Could not open the screenshot: {error}"));
                 return;
             }
         };
-        let scale_x = source.width() as f64 / allocated_width;
-        let scale_y = source.height() as f64 / allocated_height;
+        let start = map_canvas_point(
+            &canvas,
+            start_x,
+            start_y,
+            source.width() as f64,
+            source.height() as f64,
+        );
+        let end = map_canvas_point(
+            &canvas,
+            end.0,
+            end.1,
+            source.width() as f64,
+            source.height() as f64,
+        );
+        let x = start.0.min(end.0);
+        let y = start.1.min(end.1);
+        let width = (start.0 - end.0).abs();
+        let height = (start.1 - end.1).abs();
+        if width < 3.0 || height < 3.0 {
+            return;
+        }
         let crop = source.crop_imm(
-            (x * scale_x).max(0.0) as u32,
-            (y * scale_y).max(0.0) as u32,
-            (width * scale_x) as u32,
-            (height * scale_y) as u32,
+            x.max(0.0) as u32,
+            y.max(0.0) as u32,
+            width as u32,
+            height as u32,
         );
         window.close();
-        // GTK получает масштаб непосредственно от активного монитора GNOME.
-        // При дробном масштабе 175% в X11 это обычно бэкендный масштаб 2.
+        // GTK reads this scale directly from the active GNOME monitor. On X11,
+        // a fractional scale of 175% usually maps to a backend scale of 2.
         let preview_scale = (canvas.scale_factor() as f64).max(1.0);
         begin_editor(
             &app,
@@ -220,8 +273,8 @@ fn begin_selection(app: &gtk::Application, source_path: PathBuf, config: Rc<Conf
             end_config.clone(),
             preview_scale,
             preview_scale,
-            (x * scale_x).round() as i32,
-            (y * scale_y).round() as i32,
+            x.round() as i32,
+            y.round() as i32,
         );
     });
     canvas.add_controller(drag);
@@ -252,29 +305,31 @@ fn begin_editor(
 ) {
     let image = image.to_rgba8();
     let (image_width, image_height) = image.dimensions();
-    // gnome-screenshot возвращает физические пиксели, а GTK принимает размеры в
-    // логических. На HiDPI-дисплее нельзя показывать PNG в исходном размере.
     let preview_width = ((image_width as f64 / source_scale_x).round() as i32).max(1);
     let preview_height = ((image_height as f64 / source_scale_y).round() as i32).max(1);
     let window = gtk::ApplicationWindow::builder()
         .application(app)
-        .title("ScreenInk — рисуйте красным, Enter: сохранить и скопировать")
+        .title("ScreenInk")
         .default_width(preview_width.min(1200))
         .default_height(preview_height.min(800))
         .build();
-    let canvas = gtk::DrawingArea::builder()
-        .content_width(preview_width)
-        .content_height(preview_height)
-        .build();
-    let strokes = Rc::new(RefCell::new(Vec::<Vec<(f64, f64)>>::new()));
-    let preview_strokes = strokes.clone();
-    canvas.set_draw_func(move |_, context, _, _| {
-        draw_strokes(context, &preview_strokes.borrow());
+    let canvas = gtk::DrawingArea::builder().build();
+    canvas.set_hexpand(true);
+    canvas.set_vexpand(true);
+    let annotations = Rc::new(RefCell::new(Vec::<Annotation>::new()));
+    let preview_annotations = annotations.clone();
+    canvas.set_draw_func(move |_, context, width, height| {
+        draw_annotations(
+            context,
+            &preview_annotations.borrow(),
+            width as f64,
+            height as f64,
+            preview_width as f64,
+            preview_height as f64,
+        );
     });
 
     let mut preview_png = Vec::new();
-    // Не уменьшаем файл заранее: GtkPicture масштабирует оригинальный снимок при
-    // отрисовке и сохраняет заметно более чёткие шрифты.
     image
         .write_to(
             &mut std::io::Cursor::new(&mut preview_png),
@@ -285,29 +340,58 @@ fn begin_editor(
         gdk_pixbuf::Pixbuf::from_read(std::io::Cursor::new(preview_png)).expect("decode preview");
     let texture = gdk::Texture::for_pixbuf(&pixbuf);
     let picture = gtk::Picture::for_paintable(&texture);
-    picture.set_size_request(preview_width, preview_height);
+    picture.set_hexpand(true);
+    picture.set_vexpand(true);
     picture.set_can_shrink(true);
 
+    let tool = Rc::new(RefCell::new(Tool::Pen));
+    let brush = Rc::new(RefCell::new(Brush::default()));
     let drag = gtk::GestureDrag::new();
     drag.set_button(1);
-    let begin_strokes = strokes.clone();
+    let begin_annotations = annotations.clone();
+    let begin_tool = tool.clone();
+    let begin_brush = brush.clone();
     let begin_canvas = canvas.downgrade();
     drag.connect_drag_begin(move |_, x, y| {
-        begin_strokes.borrow_mut().push(vec![(x, y)]);
-        if let Some(canvas) = begin_canvas.upgrade() {
-            canvas.queue_draw();
-        }
+        let Some(canvas) = begin_canvas.upgrade() else {
+            return;
+        };
+        let point = map_canvas_point(&canvas, x, y, preview_width as f64, preview_height as f64);
+        let style = *begin_brush.borrow();
+        let annotation = match *begin_tool.borrow() {
+            Tool::Pen => Annotation::Freehand {
+                points: vec![point],
+                style,
+            },
+            Tool::Rectangle => Annotation::Rectangle {
+                start: point,
+                end: point,
+                style,
+            },
+        };
+        begin_annotations.borrow_mut().push(annotation);
+        canvas.queue_draw();
     });
-    let update_strokes = strokes.clone();
+    let update_annotations = annotations.clone();
     let update_canvas = canvas.downgrade();
     drag.connect_drag_update(move |gesture, dx, dy| {
         if let Some((origin_x, origin_y)) = gesture.start_point() {
-            if let Some(stroke) = update_strokes.borrow_mut().last_mut() {
-                stroke.push((origin_x + dx, origin_y + dy));
+            if let Some(canvas) = update_canvas.upgrade() {
+                let point = map_canvas_point(
+                    &canvas,
+                    origin_x + dx,
+                    origin_y + dy,
+                    preview_width as f64,
+                    preview_height as f64,
+                );
+                if let Some(annotation) = update_annotations.borrow_mut().last_mut() {
+                    match annotation {
+                        Annotation::Freehand { points, .. } => points.push(point),
+                        Annotation::Rectangle { end, .. } => *end = point,
+                    }
+                }
+                canvas.queue_draw();
             }
-        }
-        if let Some(canvas) = update_canvas.upgrade() {
-            canvas.queue_draw();
         }
     });
     canvas.add_controller(drag);
@@ -315,11 +399,100 @@ fn begin_editor(
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&picture));
     overlay.add_overlay(&canvas);
-    let scroll = gtk::ScrolledWindow::builder().child(&overlay).build();
-    window.set_child(Some(&scroll));
+    overlay.set_hexpand(true);
+    overlay.set_vexpand(true);
+
+    let toolbar = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(6)
+        .halign(gtk::Align::End)
+        .margin_top(8)
+        .margin_bottom(8)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    let pen_button = gtk::ToggleButton::with_label("Pen");
+    pen_button.set_active(true);
+    pen_button.set_tooltip_text(Some("Freehand drawing"));
+    let rectangle_button = gtk::ToggleButton::with_label("Rectangle");
+    rectangle_button.set_group(Some(&pen_button));
+    rectangle_button.set_tooltip_text(Some("Draw a red rectangle"));
+    let pen_tool = tool.clone();
+    pen_button.connect_toggled(move |button| {
+        if button.is_active() {
+            *pen_tool.borrow_mut() = Tool::Pen;
+        }
+    });
+    let rectangle_tool = tool.clone();
+    rectangle_button.connect_toggled(move |button| {
+        if button.is_active() {
+            *rectangle_tool.borrow_mut() = Tool::Rectangle;
+        }
+    });
+    let size_label = gtk::Label::new(Some("Size"));
+    let size_value = gtk::SpinButton::with_range(1.0, 24.0, 1.0);
+    size_value.set_value(PEN_WIDTH);
+    size_value.set_tooltip_text(Some("Line thickness"));
+    let value_brush = brush.clone();
+    size_value.connect_value_changed(move |spin| value_brush.borrow_mut().width = spin.value());
+    let color = gtk::ColorButton::new();
+    color.set_rgba(&gdk::RGBA::new(0.9, 0.02, 0.02, 1.0));
+    color.set_tooltip_text(Some("Line color"));
+    let color_brush = brush.clone();
+    color.connect_color_set(move |button| {
+        let rgba = button.rgba();
+        let width = color_brush.borrow().width;
+        *color_brush.borrow_mut() = Brush {
+            red: rgba.red() as f64,
+            green: rgba.green() as f64,
+            blue: rgba.blue() as f64,
+            width,
+        };
+    });
+    let undo_button = gtk::Button::with_label("Undo");
+    undo_button.set_tooltip_text(Some("Undo last annotation (Ctrl+Z)"));
+    let undo_annotations = annotations.clone();
+    let undo_canvas = canvas.downgrade();
+    undo_button.connect_clicked(move |_| {
+        undo_annotations.borrow_mut().pop();
+        if let Some(canvas) = undo_canvas.upgrade() {
+            canvas.queue_draw();
+        }
+    });
+    let save_button = gtk::Button::with_label("Save");
+    save_button.add_css_class("suggested-action");
+    save_button.set_tooltip_text(Some("Save and copy (Enter)"));
+    let save_window = window.downgrade();
+    let save_image = image.clone();
+    let save_annotations = annotations.clone();
+    let save_config = config.clone();
+    save_button.connect_clicked(move |_| {
+        if let Some(window) = save_window.upgrade() {
+            finish_editor(
+                &window,
+                &save_image,
+                &save_annotations.borrow(),
+                &save_config.output_dir,
+                source_scale_x,
+                source_scale_y,
+            );
+        }
+    });
+    toolbar.append(&pen_button);
+    toolbar.append(&rectangle_button);
+    toolbar.append(&size_label);
+    toolbar.append(&size_value);
+    toolbar.append(&color);
+    toolbar.append(&undo_button);
+    toolbar.append(&save_button);
+    let layout = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    layout.append(&overlay);
+    layout.append(&toolbar);
+    window.set_child(Some(&layout));
+
     let keys = gtk::EventControllerKey::new();
     let key_window = window.downgrade();
-    let key_strokes = strokes.clone();
+    let key_annotations = annotations.clone();
     let key_image = image.clone();
     let key_config = config.clone();
     let key_canvas = canvas.downgrade();
@@ -328,7 +501,7 @@ fn begin_editor(
             return glib::Propagation::Proceed;
         };
         if modifiers.contains(gdk::ModifierType::CONTROL_MASK) && keycode == X11_KEYCODE_Z {
-            key_strokes.borrow_mut().pop();
+            key_annotations.borrow_mut().pop();
             if let Some(canvas) = key_canvas.upgrade() {
                 canvas.queue_draw();
             }
@@ -340,19 +513,14 @@ fn begin_editor(
                 glib::Propagation::Stop
             }
             gdk::Key::Return => {
-                match save_and_copy(
+                finish_editor(
+                    &window,
                     &key_image,
-                    &key_strokes.borrow(),
+                    &key_annotations.borrow(),
                     &key_config.output_dir,
                     source_scale_x,
                     source_scale_y,
-                ) {
-                    Ok(path) => {
-                        eprintln!("Снимок сохранён: {}", path.display());
-                        window.close();
-                    }
-                    Err(error) => show_error(&window, &error),
-                }
+                );
                 glib::Propagation::Stop
             }
             _ => glib::Propagation::Proceed,
@@ -404,23 +572,86 @@ fn x11_frame_top_inset(window_id: &str) -> i32 {
     values.get(2).copied().unwrap_or(0)
 }
 
-fn draw_strokes(context: &gtk::cairo::Context, strokes: &[Vec<(f64, f64)>]) {
-    context.set_source_rgb(0.9, 0.02, 0.02);
-    context.set_line_width(PEN_WIDTH);
-    context.set_line_cap(gtk::cairo::LineCap::Round);
-    context.set_line_join(gtk::cairo::LineJoin::Round);
-    for stroke in strokes {
-        if let Some((x, y)) = stroke.first() {
-            context.move_to(*x, *y);
-            for (x, y) in &stroke[1..] {
-                context.line_to(*x, *y);
-            }
-            context.stroke().expect("draw red stroke");
-        }
-    }
+fn image_fit_transform(
+    available_width: f64,
+    available_height: f64,
+    image_width: f64,
+    image_height: f64,
+) -> (f64, f64, f64) {
+    let scale = (available_width / image_width)
+        .min(available_height / image_height)
+        .max(0.000_001);
+    let offset_x = (available_width - image_width * scale) / 2.0;
+    let offset_y = (available_height - image_height * scale) / 2.0;
+    (scale, offset_x, offset_y)
 }
 
-fn paint_circle(image: &mut RgbaImage, center_x: i32, center_y: i32, radius: i32) {
+fn map_canvas_point(
+    canvas: &gtk::DrawingArea,
+    x: f64,
+    y: f64,
+    image_width: f64,
+    image_height: f64,
+) -> (f64, f64) {
+    let (scale, offset_x, offset_y) = image_fit_transform(
+        canvas.allocated_width() as f64,
+        canvas.allocated_height() as f64,
+        image_width,
+        image_height,
+    );
+    (
+        ((x - offset_x) / scale).clamp(0.0, image_width),
+        ((y - offset_y) / scale).clamp(0.0, image_height),
+    )
+}
+
+fn draw_annotations(
+    context: &gtk::cairo::Context,
+    annotations: &[Annotation],
+    available_width: f64,
+    available_height: f64,
+    image_width: f64,
+    image_height: f64,
+) {
+    let (scale, offset_x, offset_y) =
+        image_fit_transform(available_width, available_height, image_width, image_height);
+    context.save().expect("save drawing state");
+    context.translate(offset_x, offset_y);
+    context.scale(scale, scale);
+    context.set_line_cap(gtk::cairo::LineCap::Round);
+    context.set_line_join(gtk::cairo::LineJoin::Round);
+    for annotation in annotations {
+        match annotation {
+            Annotation::Freehand { points, style } => {
+                context.set_source_rgb(style.red, style.green, style.blue);
+                context.set_line_width(style.width);
+                if let Some((x, y)) = points.first() {
+                    context.move_to(*x, *y);
+                    for (x, y) in &points[1..] {
+                        context.line_to(*x, *y);
+                    }
+                    if points.len() == 1 {
+                        context.arc(*x, *y, style.width / 2.0, 0.0, std::f64::consts::TAU);
+                        context.fill().expect("draw red dot");
+                    } else {
+                        context.stroke().expect("draw red stroke");
+                    }
+                }
+            }
+            Annotation::Rectangle { start, end, style } => {
+                context.set_source_rgb(style.red, style.green, style.blue);
+                context.set_line_width(style.width);
+                let x = start.0.min(end.0);
+                let y = start.1.min(end.1);
+                context.rectangle(x, y, (start.0 - end.0).abs(), (start.1 - end.1).abs());
+                context.stroke().expect("draw red rectangle");
+            }
+        }
+    }
+    context.restore().expect("restore drawing state");
+}
+
+fn paint_circle(image: &mut RgbaImage, center_x: i32, center_y: i32, radius: i32, style: Brush) {
     for y in (center_y - radius)..=(center_y + radius) {
         for x in (center_x - radius)..=(center_x + radius) {
             if x >= 0
@@ -429,13 +660,28 @@ fn paint_circle(image: &mut RgbaImage, center_x: i32, center_y: i32, radius: i32
                 && (y as u32) < image.height()
                 && (x - center_x).pow(2) + (y - center_y).pow(2) <= radius.pow(2)
             {
-                image.put_pixel(x as u32, y as u32, Rgba([230, 5, 5, 255]));
+                image.put_pixel(
+                    x as u32,
+                    y as u32,
+                    Rgba([
+                        (style.red * 255.0).round() as u8,
+                        (style.green * 255.0).round() as u8,
+                        (style.blue * 255.0).round() as u8,
+                        255,
+                    ]),
+                );
             }
         }
     }
 }
 
-fn draw_line(image: &mut RgbaImage, start: (f64, f64), end: (f64, f64), pen_width: f64) {
+fn draw_line(
+    image: &mut RgbaImage,
+    start: (f64, f64),
+    end: (f64, f64),
+    pen_width: f64,
+    style: Brush,
+) {
     let dx = end.0 - start.0;
     let dy = end.1 - start.1;
     let steps = dx.abs().max(dy.abs()).max(1.0) as i32;
@@ -446,33 +692,62 @@ fn draw_line(image: &mut RgbaImage, start: (f64, f64), end: (f64, f64), pen_widt
             (start.0 + dx * t).round() as i32,
             (start.1 + dy * t).round() as i32,
             (pen_width / 2.0).ceil() as i32,
+            style,
         );
     }
 }
 
 fn render_annotations(
     source: &RgbaImage,
-    strokes: &[Vec<(f64, f64)>],
+    annotations: &[Annotation],
     source_scale_x: f64,
     source_scale_y: f64,
 ) -> RgbaImage {
     let mut result = source.clone();
-    let pen_width = PEN_WIDTH * ((source_scale_x + source_scale_y) / 2.0);
-    for stroke in strokes {
-        let scaled_stroke: Vec<(f64, f64)> = stroke
-            .iter()
-            .map(|(x, y)| (x * source_scale_x, y * source_scale_y))
-            .collect();
-        for segment in scaled_stroke.windows(2) {
-            draw_line(&mut result, segment[0], segment[1], pen_width);
-        }
-        if scaled_stroke.len() == 1 {
-            paint_circle(
-                &mut result,
-                scaled_stroke[0].0.round() as i32,
-                scaled_stroke[0].1.round() as i32,
-                (pen_width / 2.0).ceil() as i32,
-            );
+    for annotation in annotations {
+        match annotation {
+            Annotation::Freehand { points, style } => {
+                let scaled_points: Vec<(f64, f64)> = points
+                    .iter()
+                    .map(|(x, y)| (x * source_scale_x, y * source_scale_y))
+                    .collect();
+                for segment in scaled_points.windows(2) {
+                    draw_line(
+                        &mut result,
+                        segment[0],
+                        segment[1],
+                        style.width * ((source_scale_x + source_scale_y) / 2.0),
+                        *style,
+                    );
+                }
+                if scaled_points.len() == 1 {
+                    paint_circle(
+                        &mut result,
+                        scaled_points[0].0.round() as i32,
+                        scaled_points[0].1.round() as i32,
+                        (style.width * ((source_scale_x + source_scale_y) / 2.0) / 2.0).ceil()
+                            as i32,
+                        *style,
+                    );
+                }
+            }
+            Annotation::Rectangle { start, end, style } => {
+                let top_left = (
+                    start.0.min(end.0) * source_scale_x,
+                    start.1.min(end.1) * source_scale_y,
+                );
+                let bottom_right = (
+                    start.0.max(end.0) * source_scale_x,
+                    start.1.max(end.1) * source_scale_y,
+                );
+                let top_right = (bottom_right.0, top_left.1);
+                let bottom_left = (top_left.0, bottom_right.1);
+                let scaled_width = style.width * ((source_scale_x + source_scale_y) / 2.0);
+                draw_line(&mut result, top_left, top_right, scaled_width, *style);
+                draw_line(&mut result, top_right, bottom_right, scaled_width, *style);
+                draw_line(&mut result, bottom_right, bottom_left, scaled_width, *style);
+                draw_line(&mut result, bottom_left, top_left, scaled_width, *style);
+            }
         }
     }
     result
@@ -480,14 +755,14 @@ fn render_annotations(
 
 fn save_and_copy(
     source: &RgbaImage,
-    strokes: &[Vec<(f64, f64)>],
+    annotations: &[Annotation],
     output_dir: &Path,
     source_scale_x: f64,
     source_scale_y: f64,
 ) -> Result<PathBuf, String> {
     fs::create_dir_all(output_dir).map_err(|error| {
         format!(
-            "Не удалось создать каталог {}: {error}",
+            "Could not create output directory {}: {error}",
             output_dir.display()
         )
     })?;
@@ -495,17 +770,40 @@ fn save_and_copy(
         "screenink-{}.png",
         Local::now().format("%Y-%m-%d_%H-%M-%S")
     ));
-    render_annotations(source, strokes, source_scale_x, source_scale_y)
+    render_annotations(source, annotations, source_scale_x, source_scale_y)
         .save(&path)
-        .map_err(|error| format!("Не удалось сохранить PNG: {error}"))?;
+        .map_err(|error| format!("Could not save PNG: {error}"))?;
     let file = gio::File::for_path(&path);
     let texture = gdk::Texture::from_file(&file)
-        .map_err(|error| format!("Не удалось подготовить буфер обмена: {error}"))?;
+        .map_err(|error| format!("Could not prepare the clipboard: {error}"))?;
     gdk::Display::default()
-        .ok_or_else(|| "Нет доступа к графическому дисплею".to_owned())?
+        .ok_or_else(|| "No graphical display is available".to_owned())?
         .clipboard()
         .set_texture(&texture);
     Ok(path)
+}
+
+fn finish_editor(
+    window: &gtk::ApplicationWindow,
+    image: &RgbaImage,
+    annotations: &[Annotation],
+    output_dir: &Path,
+    source_scale_x: f64,
+    source_scale_y: f64,
+) {
+    match save_and_copy(
+        image,
+        annotations,
+        output_dir,
+        source_scale_x,
+        source_scale_y,
+    ) {
+        Ok(path) => {
+            eprintln!("Screenshot saved: {}", path.display());
+            window.close();
+        }
+        Err(error) => show_error(window, &error),
+    }
 }
 
 fn show_error(window: &gtk::ApplicationWindow, message: &str) {
@@ -522,9 +820,8 @@ fn show_error(window: &gtk::ApplicationWindow, message: &str) {
 fn main() {
     let app = gtk::Application::builder().application_id(APP_ID).build();
     app.connect_activate(|app| {
-        // На X11 буфер обмена принадлежит процессу-источнику. Удерживаем только
-        // основной D-Bus-экземпляр. Удалённые запуски от Print передают ему
-        // активацию и завершаются, не оставаясь фоновыми процессами.
+        // On X11, the clipboard belongs to the source process. Hold only the
+        // primary D-Bus instance; remote Print launches activate it and exit.
         if app.is_remote() {
             return;
         }

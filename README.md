@@ -1,21 +1,21 @@
 # ScreenInk
 
-Лёгкий скриншотер для Pop!_OS/GNOME X11: выделяет прямоугольную область экрана,
-даёт рисовать поверх неё красным маркером, затем сохраняет PNG и копирует его в
-буфер обмена за одно действие.
+A lightweight screenshot tool for Pop!_OS/GNOME X11. Select any rectangular area,
+annotate it with a red pen or rectangle, then save a PNG and copy it to the
+clipboard in one action.
 
-## Управление
+## Controls
 
-1. Запустите `screenink`.
-2. Зажмите левую кнопку мыши и выделите область.
-3. В открывшемся редакторе нарисуйте нужные красные пометки.
-4. Нажмите `Ctrl+Z`, чтобы отменить последний штрих.
-5. Нажмите `Enter` — изображение сохранится и скопируется в буфер. `Esc` отменяет действие.
+1. Run `screenink`.
+2. Drag to select an area of the screen.
+3. Use **Pen** or **Rectangle** to add red annotations.
+4. Use **Undo** or `Ctrl+Z` to remove the last annotation.
+5. Use **Save** or `Enter` to save and copy the image. `Esc` cancels.
 
-## Сборка
+## Build
 
-На Pop!_OS установите системные зависимости и актуальный Rust (стандартные пакеты
-в Pop!_OS 22.04 содержат слишком старый Rust 1.69):
+Install the system dependencies and a current Rust toolchain. The Rust package
+shipped with Pop!_OS 22.04 is too old:
 
 ```bash
 sudo apt install build-essential pkg-config libgtk-4-dev gnome-screenshot
@@ -24,37 +24,31 @@ source "$HOME/.cargo/env"
 rustup default stable
 ```
 
-Затем соберите и установите программу:
+Build and install the application:
 
 ```bash
 cargo build --release
-./install.sh
+bash install.sh
 ```
 
-Настройте каталог снимков в `~/.config/screenink/config.toml`. По умолчанию это
-`~/Pictures/Screenshots`. Масштаб интерфейса автоматически берётся из активного
-монитора GNOME; вручную его настраивать не нужно.
+Set the output directory in `~/.config/screenink/config.toml`. It defaults to
+`~/Pictures/Screenshots`. Screen scaling is automatically read from the active
+GNOME monitor.
 
-## Замена стандартного Print Screen в GNOME
+## Replacing GNOME Print Screen
 
-Отключите встроенную привязку:
+Disable GNOME's built-in screenshot overlay:
 
 ```bash
 gsettings set org.gnome.shell.keybindings show-screenshot-ui '[]'
 ```
 
-Затем откройте **Настройки → Клавиатура → Просмотр и настройка сочетаний клавиш →
-Пользовательские сочетания**, добавьте `ScreenInk` с командой `screenink` и назначьте
-ему клавишу `Print`. Этот способ сохраняет другие пользовательские сочетания.
+Then open **Settings → Keyboard → View and Customize Shortcuts → Custom
+Shortcuts**, add `ScreenInk` with command `screenink`, and bind it to `Print`.
+This preserves your other custom shortcuts.
 
-После этого Print Screen запускает ScreenInk вместо стандартного скриншотера. Чтобы
-вернуть стандартный GNOME-скриншотер, выполните:
+To restore the default GNOME screenshot UI:
 
 ```bash
 gsettings reset org.gnome.shell.keybindings show-screenshot-ui
 ```
-
-## Следующие функции
-
-Архитектура редактора уже хранит штрихи отдельно от изображения. Следующими
-естественно добавить отмену (`Ctrl+Z`), стрелки, текст, прямоугольники и размытие.
