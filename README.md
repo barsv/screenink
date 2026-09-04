@@ -18,7 +18,7 @@ Install the system dependencies and a current Rust toolchain. The Rust package
 shipped with Pop!_OS 22.04 is too old:
 
 ```bash
-sudo apt install build-essential pkg-config libgtk-4-dev gnome-screenshot
+sudo apt install build-essential pkg-config libgtk-4-dev
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 rustup default stable

@@ -12,6 +12,10 @@ use chrono::Local;
 use gtk::{gdk, gio, glib, prelude::*};
 use image::{DynamicImage, Rgba, RgbaImage};
 use serde::Deserialize;
+use x11rb::{
+    connection::Connection,
+    protocol::xproto::{ConnectionExt as _, ImageFormat},
+};
 
 const APP_ID: &str = "io.github.stan.ScreenInk";
 const PEN_WIDTH: f64 = 5.0;
@@ -65,16 +69,67 @@ fn temporary_capture_path() -> PathBuf {
 
 fn capture_desktop() -> Result<PathBuf, String> {
     let path = temporary_capture_path();
-    let status = Command::new("gnome-screenshot")
-        .args(["-f", path.to_string_lossy().as_ref()])
-        .status()
-        .map_err(|error| format!("Could not run gnome-screenshot: {error}"))?;
-
-    if status.success() && path.is_file() {
-        Ok(path)
-    } else {
-        Err("gnome-screenshot could not create an image".to_owned())
+    let (connection, screen_index) =
+        x11rb::connect(None).map_err(|error| format!("Could not connect to X11: {error}"))?;
+    let screen = &connection.setup().roots[screen_index];
+    let root = screen.root;
+    let width = screen.width_in_pixels;
+    let height = screen.height_in_pixels;
+    let visual_id = screen.root_visual;
+    let visual = connection
+        .setup()
+        .roots
+        .iter()
+        .flat_map(|root| root.allowed_depths.iter())
+        .flat_map(|depth| depth.visuals.iter())
+        .find(|visual| visual.visual_id == visual_id)
+        .ok_or_else(|| "Could not find the X11 root visual".to_owned())?;
+    let reply = connection
+        .get_image(ImageFormat::Z_PIXMAP, root, 0, 0, width, height, u32::MAX)
+        .map_err(|error| format!("Could not request the X11 screen image: {error}"))?
+        .reply()
+        .map_err(|error| format!("Could not receive the X11 screen image: {error}"))?;
+    let bits_per_pixel = connection
+        .setup()
+        .pixmap_formats
+        .iter()
+        .find(|format| format.depth == reply.depth)
+        .map(|format| format.bits_per_pixel)
+        .ok_or_else(|| "Could not determine the X11 pixel format".to_owned())?;
+    let bytes_per_pixel = usize::from(bits_per_pixel).div_ceil(8);
+    let stride = reply.data.len() / usize::from(height);
+    let mut image = RgbaImage::new(u32::from(width), u32::from(height));
+    for y in 0..usize::from(height) {
+        for x in 0..usize::from(width) {
+            let offset = y * stride + x * bytes_per_pixel;
+            let pixel = reply.data[offset..offset + bytes_per_pixel]
+                .iter()
+                .enumerate()
+                .fold(0_u32, |value, (byte_index, byte)| {
+                    value | (u32::from(*byte) << (byte_index * 8))
+                });
+            image.put_pixel(
+                x as u32,
+                y as u32,
+                Rgba([
+                    x11_channel(pixel, visual.red_mask),
+                    x11_channel(pixel, visual.green_mask),
+                    x11_channel(pixel, visual.blue_mask),
+                    255,
+                ]),
+            );
+        }
     }
+    image
+        .save(&path)
+        .map_err(|error| format!("Could not save the X11 screen image: {error}"))?;
+    Ok(path)
+}
+
+fn x11_channel(pixel: u32, mask: u32) -> u8 {
+    let shift = mask.trailing_zeros();
+    let maximum = mask >> shift;
+    (((pixel & mask) >> shift) * 255 / maximum) as u8
 }
 
 fn draw_crosshair(context: &gtk::cairo::Context, state: &SelectionState) {

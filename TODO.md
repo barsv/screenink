@@ -1,7 +1,7 @@
 # ScreenInk roadmap
 
-- Replace the `gnome-screenshot` subprocess with direct X11 capture to remove
-  process-start latency.
+- Add a Wayland/PipeWire capture backend for systems that do not permit direct
+  X11 capture.
 - Support multiple monitors with one selection overlay per monitor, preserving
   each monitor's position and scale in the virtual desktop.
 - Add arrows, text labels, blur, and an eraser.
