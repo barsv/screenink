@@ -7,10 +7,22 @@ if pgrep -x screenink >/dev/null; then
   pkill -x screenink
 fi
 
-install -Dm755 target/release/screenink "$HOME/.local/bin/screenink"
-if [[ ! -f "$HOME/.config/screenink/config.toml" ]]; then
-  install -Dm644 config.example.toml "$HOME/.config/screenink/config.toml"
+PROGRAM_DIR=/barsv/progs/screenink
+install -Dm755 target/release/screenink "$PROGRAM_DIR/screenink"
+if [[ ! -f "$PROGRAM_DIR/config.toml" ]]; then
+  install -Dm644 config.example.toml "$PROGRAM_DIR/config.toml"
 fi
+gsettings set \
+  org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/screenink/ \
+  name ScreenInk
+gsettings set \
+  org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/screenink/ \
+  command "$PROGRAM_DIR/screenink --capture"
+gsettings set \
+  org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/screenink/ \
+  binding Print
+gsettings set org.gnome.settings-daemon.plugins.media-keys custom-keybindings \
+  "['/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/screenink/']"
 
-echo "ScreenInk installed to ~/.local/bin/screenink"
-echo "Follow the README to bind it to Print Screen."
+echo "ScreenInk installed to $PROGRAM_DIR"
+echo "Bind $PROGRAM_DIR/screenink --capture to Print Screen."

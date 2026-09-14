@@ -1,2 +1,5 @@
 # Screenshots are saved here automatically. The path may be absolute.
 output_dir = "/home/stan/Pictures/Screenshots"
+
+# Maximum time to wait for GNOME's screenshot selector. Set to 0 to disable.
+portal_timeout_seconds = 60
